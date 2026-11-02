@@ -1,4 +1,15 @@
+# Environment variables
 .env
+**/.env
+
+# Python virtual environments
+.venv/
+**/.venv/
+
+# Google ADK
 .adk/
+**/.adk/
+
+# Google credentials and tokens
 credentials.json
 token.json
