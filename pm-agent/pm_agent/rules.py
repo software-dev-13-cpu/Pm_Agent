@@ -1,10 +1,23 @@
 from datetime import date, timedelta
+import holidays
 
-from .config import STALE_AFTER_WORKING_DAYS, HOLIDAYS, BEHIND_SCHEDULE_POINTS
+from .config import STALE_AFTER_WORKING_DAYS, BEHIND_SCHEDULE_POINTS
 
-HOLIDAY_DATES = {date.fromisoformat(d) for d in HOLIDAYS}
+HOLIDAY_DATES = set()
 NO_BLOCKER_WORDS = {"", "none", "no", "nil", "n/a", "na", "-"}
 
+
+def set_holidays(extra_dates, today, official_dates=None):
+    """Fills HOLIDAY_DATES with official Sri Lankan holidays plus extra dates.
+    If official_dates is not given, the holidays library is used.
+    Returns how many official holidays are known for this year."""
+    if official_dates is None:
+        official_dates = set(holidays.country_holidays(
+            "LK", years=[today.year - 1, today.year, today.year + 1]).keys())
+    HOLIDAY_DATES.clear()
+    HOLIDAY_DATES.update(official_dates)
+    HOLIDAY_DATES.update(extra_dates)
+    return sum(1 for d in official_dates if d.year == today.year)
 
 def parse_date(value):
     """Turns 'yyyy-mm-dd' into a date. Returns None if blank or invalid."""
@@ -43,6 +56,10 @@ def check_project(project, today):
     entries = project["entries"]
     flags = []
 
+    if project.get("access_error"):
+        return [{"rule": "access_error",
+                 "detail": f"Could not read the project sheet: {project['access_error']}"}]
+
     if info.get("Status", "Active").strip() != "Active":
         return flags
 
@@ -79,6 +96,11 @@ def check_project(project, today):
         flags.append({"rule": "behind_schedule",
                       "detail": f"{pct:.0f}% complete, about {expected}% expected by now."})
 
+    if "id_mismatch" in project:
+        flags.append({"rule": "id_mismatch",
+                      "detail": f"The project sheet says Project ID '{project['id_mismatch']}', "
+                                f"but the index says '{info.get('Project ID')}'."})
+
     if project["bad_rows"]:
         rows = ", ".join(str(r) for r in project["bad_rows"])
         flags.append({"rule": "data_issue",
@@ -100,7 +122,7 @@ def snapshot(project, today):
         health = status
     elif "overdue" in rules:
         health = "Overdue"
-    elif rules & {"blocked", "behind_schedule", "stale", "no_updates", "missing_deadline"}:
+    elif rules & {"blocked", "behind_schedule", "stale", "no_updates","missing_deadline", "access_error"}:
         health = "Needs attention"
     elif "ready_to_close" in rules:
         health = "Ready to close"

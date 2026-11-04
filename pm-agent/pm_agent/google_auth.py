@@ -42,6 +42,9 @@ def sheets_service():
 def gmail_service():
     return build("gmail", "v1", credentials=get_credentials())
 
+def calendar_service():
+    return build("calendar", "v3", credentials=get_credentials())
+
 if __name__ == "__main__":
     get_credentials()
     print("Signed in. token.json saved.")

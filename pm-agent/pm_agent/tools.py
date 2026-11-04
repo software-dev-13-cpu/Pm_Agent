@@ -1,13 +1,14 @@
 import base64
-import json
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
-from .config import SPREADSHEET_ID, SUMMARY_TAB, LOG_TAB, TIMEZONE, PROJECT_TAB_PATTERN
-from .google_auth import sheets_service, gmail_service
-from .rules import snapshot, parse_date
+import holidays
+
+from .config import (SPREADSHEET_ID, SUMMARY_TAB, LOG_TAB, TIMEZONE, INDEX_TAB, HOLIDAYS_TAB,LK_HOLIDAY_CALENDAR)
+from .google_auth import sheets_service, gmail_service, calendar_service
+from .rules import snapshot, parse_date, set_holidays
 from .sheet_layout import parse_project_tab
 
 HEALTH_ORDER = {"Overdue": 0, "Needs attention": 1, "Ready to close": 2, "On track": 3}
@@ -24,27 +25,108 @@ def _quote(title):
     return "'" + title.replace("'", "''") + "'"
 
 
-def _load_projects():
-    """Reads every project tab (named like 'P01 ...') in one request."""
-    sheets = sheets_service().spreadsheets()
-    meta = sheets.get(spreadsheetId=SPREADSHEET_ID,
-                      fields="sheets.properties(title,sheetId)").execute()
-    tabs = [s["properties"] for s in meta["sheets"]
-            if re.match(PROJECT_TAB_PATTERN, s["properties"]["title"])]
-    if not tabs:
-        return []
+def _file_id(link):
+    """Gets the spreadsheet ID from a Google Sheets link (or accepts a bare ID)."""
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", link)
+    if match:
+        return match.group(1)
+    link = link.strip()
+    return link if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", link) else None
 
-    result = sheets.values().batchGet(
-        spreadsheetId=SPREADSHEET_ID,
-        ranges=[f"{_quote(t['title'])}!A1:E" for t in tabs],
-    ).execute()
+
+
+def _company_holidays():
+    """Date -> name from the master's Holidays tab. Empty if the tab is missing."""
+    try:
+        rows = (sheets_service().spreadsheets().values()
+                .get(spreadsheetId=SPREADSHEET_ID, range=f"{_quote(HOLIDAYS_TAB)}!A2:B")
+                .execute().get("values", []))
+    except Exception as e:
+        print(f"Could not read the {HOLIDAYS_TAB} tab: {e}")
+        return {}
+    result = {}
+    for row in rows:
+        day = parse_date(row[0]) if row else None
+        if day:
+            name = row[1].strip() if len(row) > 1 else ""
+            result[day] = name or "Company day off"
+    return result
+
+
+def _google_holidays(start, end):
+    """Date -> name from Google's Sri Lanka holiday calendar. Raises on any error."""
+    tz = ZoneInfo(TIMEZONE)
+    day_after_end = end + timedelta(days=1)
+    events = (
+        calendar_service().events()
+        .list(calendarId=LK_HOLIDAY_CALENDAR,
+              timeMin=datetime(start.year, start.month, start.day, tzinfo=tz).isoformat(),
+              timeMax=datetime(day_after_end.year, day_after_end.month,
+                               day_after_end.day, tzinfo=tz).isoformat(),
+              singleEvents=True, orderBy="startTime", maxResults=250)
+        .execute().get("items", [])
+    )
+    result = {}
+    for event in events:
+        if "observance" in event.get("description", "").lower():
+            continue
+        day = parse_date(event.get("start", {}).get("date", ""))
+        if day:
+            result[day] = event.get("summary", "Public holiday")
+    return result
+
+
+def _official_holidays(start, end):
+    """Official holidays from Google Calendar, or from the holidays library if that fails.
+    Returns (date -> name, source name)."""
+    try:
+        return _google_holidays(start, end), "Google Calendar"
+    except Exception as e:
+        print(f"Google holiday calendar unavailable ({e}). Using the holidays library.")
+        library = holidays.country_holidays("LK", years=list(range(start.year, end.year + 1)),
+                                            language="en_US")
+        return {d: n for d, n in library.items() if start <= d <= end}, "holidays library"
+
+
+def _load_holidays():
+    """Loads official holidays plus the Holidays tab dates into the rules.
+    Returns how many official holidays are known for this year."""
+    today = _now().date()
+    official, _ = _official_holidays(date(today.year - 1, 1, 1), date(today.year + 1, 12, 31))
+    return set_holidays(set(_company_holidays()), today, official_dates=set(official))
+    
+
+
+def _load_projects():
+    """Reads the index tab, then each project's own spreadsheet."""
+    _load_holidays()
+    values = sheets_service().spreadsheets().values()
+    index = values.get(spreadsheetId=SPREADSHEET_ID,
+                       range=f"{_quote(INDEX_TAB)}!A2:C").execute().get("values", [])
 
     projects = []
-    for tab, value_range in zip(tabs, result.get("valueRanges", [])):
-        projects.append(parse_project_tab(tab["title"], tab["sheetId"],
-                                          value_range.get("values", [])))
+    for row in index:
+        project_id, name, link = (cell.strip() for cell in (row + ["", "", ""])[:3])
+        if not project_id:
+            continue
+        project_id = project_id.upper()
+        file_id = _file_id(link)
+        try:
+            if file_id is None:
+                raise ValueError("The Sheet link is missing or is not a Google Sheets link.")
+            rows = values.get(spreadsheetId=file_id, range="A1:E").execute().get("values", [])
+            project = parse_project_tab(name, None, rows)
+            file_says = project["info"].get("Project ID", "").upper()
+            if file_says != project_id:
+                project["id_mismatch"] = file_says
+            project["info"]["Project ID"] = project_id
+        except Exception as e:
+            project = {"tab": name, "gid": None, "entries": [], "bad_rows": [],
+                       "has_table": False, "access_error": str(e)[:200],
+                       "info": {"Project ID": project_id, "Project name": name}}
+        project["file_id"] = file_id
+        projects.append(project)
     return projects
-
 
 def _find_project(projects, project_id):
     wanted = project_id.strip().upper()
@@ -59,9 +141,10 @@ def _entry_out(entry):
             "blocker": entry["blocker"]}
 
 
-def _tab_link(project):
-    return f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid={project['gid']}"
-
+def _project_link(project):
+    if not project.get("file_id"):
+        return ""
+    return f"https://docs.google.com/spreadsheets/d/{project['file_id']}/edit"
 
 def _read_log():
     return (sheets_service().spreadsheets().values()
@@ -146,7 +229,7 @@ def read_project_log(project_id: str, last_n: int = 10) -> dict:
     return {"status": "success", "details": project["info"],
             "total_rows": len(project["entries"]),
             "recent_updates": [_entry_out(e) for e in project["entries"][-last_n:]],
-            "tab_link": _tab_link(project)}
+            "tab_link": _project_link(project)}
 
 
 def developer_activity(developer_name: str, days: int = 7) -> dict:
@@ -177,22 +260,23 @@ def developer_activity(developer_name: str, days: int = 7) -> dict:
             "count": len(activity), "activity": activity}
 
 
-def write_summary(assessments_json: str) -> dict:
+def write_summary(assessments: list[str]) -> dict:
     """Rewrites the Summary tab for the GM. All figures are recomputed in code;
-    you only supply the one-sentence assessment for each project.
+    you only supply a one-sentence assessment for each project.
 
     Args:
-        assessments_json: A JSON object mapping project ID to one short
-            sentence, e.g. '{"P01": "On track; approval flow done.", "P02": "..."}'.
+        assessments: One item per project, each written as
+            'P01: one short sentence'.
     """
-    try:
-        assessments = json.loads(assessments_json) if assessments_json.strip() else {}
-        if not isinstance(assessments, dict):
-            raise ValueError
-    except ValueError:
-        return {"status": "error",
-                "message": 'assessments_json must be a JSON object like {"P01": "one sentence"}.'}
-    assessments = {str(k).strip().upper(): str(v) for k, v in assessments.items()}
+    parsed = {}
+    unreadable = []
+    for item in assessments:
+        project_id, separator, text = str(item).partition(":")
+        if separator and project_id.strip() and text.strip():
+            parsed[project_id.strip().upper()] = text.strip()
+        else:
+            unreadable.append(str(item))
+    assessments = parsed
 
     try:
         projects = _load_projects()
@@ -231,7 +315,8 @@ def write_summary(assessments_json: str) -> dict:
     known = {s["project_id"].upper() for s in snaps}
     return {"status": "success", "projects_written": len(snaps),
             "missing_assessments": sorted(known - set(assessments)),
-            "unknown_ids_ignored": sorted(set(assessments) - known)}
+            "unknown_ids_ignored": sorted(set(assessments) - known),
+            "unreadable_items": unreadable}
 
 
 def append_log(project_id: str, note: str) -> dict:
@@ -285,12 +370,12 @@ def email_developer(project_id: str, note: str = "", force: bool = False) -> dic
         lines = [
             f"Hi {name.split()[0] if name else ''},",
             "",
-            f"The {pid} - {info.get('Project name', '')} tab has had no update since "
+                        f"The {pid} - {info.get('Project name', '')} sheet has had no update since "
             f"{last.isoformat() if last else 'the project started'}.",
             "Please add a row for your recent work: Date, Developer, Work done, "
             "Completion % (whole project), Blockers.",
             "",
-            f"Your project tab: {_tab_link(project)}",
+            f"Your project sheet: {_project_link(project)}",
         ]
         if note:
             lines += ["", f"Note: {note}"]
@@ -309,3 +394,78 @@ def email_developer(project_id: str, note: str = "", force: bool = False) -> dic
         return {"status": "error", "message": str(e)}
 
     return {"status": "success", "sent_to": to}
+
+
+def list_holidays(project_id: str = "", start_date: str = "", end_date: str = "") -> dict:
+    """Lists Sri Lankan public holidays and company days off in a period, and
+    which projects each one falls within.
+
+    Args:
+        project_id: A project ID (e.g. 'P05') to use that project's start date
+            and target deadline, or 'ALL' to cover every project. Leave empty
+            to use start_date and end_date instead.
+        start_date: yyyy-mm-dd. Used only when project_id is empty.
+        end_date: yyyy-mm-dd. Used only when project_id is empty.
+    """
+    try:
+        projects = _load_projects()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    spans = {}
+    for p in projects:
+        start = parse_date(p["info"].get("Start date", ""))
+        deadline = parse_date(p["info"].get("Target deadline", ""))
+        if start and deadline:
+            spans[p["info"]["Project ID"]] = (start, deadline)
+
+    wanted = project_id.strip().upper()
+    if wanted.isdigit():
+        wanted = f"P{int(wanted):02d}"
+    if wanted == "ALL":
+        if not spans:
+            return {"status": "error", "message": "No project has both a start date and a deadline."}
+        start = min(s for s, _ in spans.values())
+        end = max(d for _, d in spans.values())
+    elif wanted:
+        if wanted not in spans:
+            return {"status": "error",
+                    "message": f"No project '{wanted}' with both a start date and a target deadline."}
+        start, end = spans[wanted]
+    else:
+        start = parse_date(start_date) or _now().date()
+        end = parse_date(end_date) or start + timedelta(days=60)
+
+    if end < start:
+        return {"status": "error", "message": "The end date is before the start date."}
+    if (end - start).days > 730:
+        return {"status": "error", "message": "Please ask for a period of two years or less."}
+
+    years = list(range(start.year, end.year + 1))
+    official, official_source = _official_holidays(start, end)
+    company = _company_holidays()
+
+    found = [(d, n, "Official") for d, n in official.items() if start <= d <= end]
+    found += [(d, n, "Company") for d, n in company.items() if start <= d <= end]
+    found.sort()
+
+    result = []
+    for day, name, source in found:
+        result.append({
+            "date": day.isoformat(),
+            "day": day.strftime("%A"),
+            "name": name,
+            "source": source,
+            "on_a_weekday": day.weekday() < 5,
+            "projects": sorted(pid for pid, (s, d) in spans.items() if s <= day <= d),
+        })
+
+    missing_years = [y for y in years if not any(d.year == y for d in official)]
+    reply = {"status": "success", "from": start.isoformat(), "to": end.isoformat(),
+             "official_source": official_source,
+             "count": len(result), "weekday_count": sum(h["on_a_weekday"] for h in result),
+             "holidays": result}
+    if missing_years:
+        reply["warning"] = (f"No official holiday list is available yet for {missing_years}. "
+                            "Only company days off are shown for those years.")
+    return reply
