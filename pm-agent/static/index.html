@@ -19,6 +19,10 @@
     --error: #b42318;
     --error-bg: #fef3f2;
     --overlay: rgba(245, 246, 248, 0.78);
+        --glow-1: #6366f1;
+    --glow-2: #8b5cf6;
+    --glow-3: #3b82f6;
+    --glow-shadow: rgba(124, 92, 246, 0.35);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -35,6 +39,10 @@
       --error: #f97066;
       --error-bg: #2a1715;
       --overlay: rgba(10, 12, 30, 0.35);
+      --glow-1: #6366f1;
+      --glow-2: #8b5cf6;
+      --glow-3: #3b82f6;
+      --glow-shadow: rgba(124, 92, 246, 0.35);
     }
   }
   * { box-sizing: border-box; }
@@ -73,16 +81,22 @@
 
   /* ---------- chat layout ---------- */
   #chat-screen { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  header {
-    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
-    background: var(--panel); border-bottom: 1px solid var(--border);
+    header {
+    display: flex; align-items: center; gap: 12px; padding: 16px 20px;
+    background: transparent;
   }
-  header h1 { margin: 0; font-size: 17px; flex: 1; }
+  header h1 { margin: 0; font-size: 18px; flex: 1; letter-spacing: 0.2px; }
   header .user { color: var(--muted); font-size: 13px; }
   header button {
-    border: 1px solid var(--border); background: transparent; color: var(--text);
-    border-radius: 8px; padding: 6px 12px; font-size: 13px;
+    border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+    background: color-mix(in srgb, var(--panel) 35%, transparent);
+    backdrop-filter: blur(8px);
+    color: var(--text); border-radius: 999px; padding: 6px 14px; font-size: 13px;
+    transition: background 0.15s;
   }
+  header button:hover { background: color-mix(in srgb, var(--panel) 65%, transparent); }
+
+  
   #messages { flex: 1; overflow-y: auto; padding: 20px 16px; }
   .inner { max-width: 820px; margin: 0 auto; }
 
@@ -126,19 +140,62 @@
   .typing span:nth-child(3) { animation-delay: .4s; }
   @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
 
-  /* ---------- input ---------- */
-  footer { background: var(--panel); border-top: 1px solid var(--border); padding: 12px 16px; }
-  form.send { display: flex; gap: 8px; max-width: 820px; margin: 0 auto; }
+    /* ---------- input ---------- */
+  footer { padding: 12px 16px 14px; }
+  .composer {
+    max-width: 820px; margin: 0 auto; padding: 2px; border-radius: 22px;
+    background: linear-gradient(120deg, var(--glow-1), var(--glow-2), var(--glow-3), var(--glow-1));
+    background-size: 300% 300%;
+    box-shadow: 0 10px 30px rgba(20, 16, 60, 0.25);
+    transition: box-shadow 0.25s;
+  }
+  .composer:focus-within {
+    animation: shimmer 6s linear infinite;
+    box-shadow: 0 10px 40px var(--glow-shadow);
+  }
+  @keyframes shimmer { from { background-position: 0% 50%; } to { background-position: 300% 50%; } }
+  .composer-inner {
+    border-radius: 20px; padding: 10px 10px 8px 14px;
+    background: color-mix(in srgb, var(--panel) 90%, transparent);
+    backdrop-filter: blur(12px);
+  }
+  form.send { display: flex; align-items: flex-end; gap: 10px; }
+  .prompt-icon { flex-shrink: 0; margin-bottom: 9px; color: var(--glow-2); }
   form.send textarea {
-    flex: 1; resize: none; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
-    background: var(--bg); color: var(--text); font: inherit; max-height: 140px;
+    flex: 1; resize: none; border: 0; outline: none; background: transparent;
+    color: var(--text); font: inherit; font-size: 15px; line-height: 1.5;
+    padding: 6px 0; max-height: 140px;
   }
-  form.send button {
-    border: 0; border-radius: 10px; padding: 0 18px; background: var(--accent);
-    color: var(--accent-text); font-weight: 600;
+  form.send textarea::placeholder { color: var(--muted); }
+  #send-button {
+    flex-shrink: 0; width: 42px; height: 42px; border: 0; border-radius: 50%;
+    display: grid; place-items: center; color: #fff;
+    background: linear-gradient(135deg, var(--glow-1), var(--glow-3));
+    box-shadow: 0 4px 14px var(--glow-shadow);
+    transition: transform 0.15s, opacity 0.15s;
   }
-  form.send button:disabled { opacity: .5; cursor: default; }
-  .hint { max-width: 820px; margin: 6px auto 0; color: var(--muted); font-size: 12px; }
+  #send-button:hover:not(:disabled) { transform: translateY(-1px) scale(1.06); }
+  #send-button:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+  #send-button .spinner {
+    display: none; width: 18px; height: 18px; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.35); border-top-color: #fff;
+    animation: spin 0.8s linear infinite;
+  }
+  #send-button.loading svg { display: none; }
+  #send-button.loading .spinner { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .composer-meta {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    margin-top: 4px; padding-left: 28px; font-size: 12px; color: var(--muted);
+  }
+  kbd {
+    font-family: inherit; font-size: 11px; padding: 1px 6px; border-radius: 5px;
+    border: 1px solid var(--border); border-bottom-width: 2px;
+    background: var(--chip); color: var(--text);
+  }
+  #counter.near { color: var(--error); font-weight: 600; }
+  .hint { max-width: 820px; margin: 8px auto 0; text-align: center; color: var(--muted); font-size: 12px; }
+  @media (max-width: 520px) { .keys { display: none; } .composer-meta { justify-content: flex-end; } }
 </style>
 </head>
 <body>
@@ -174,7 +231,6 @@
         <div class="chips">
           <button>What needs attention?</button>
           <button>How are the projects going?</button>
-          <button>What has Kasun worked on this week?</button>
           <button>List holidays</button>
           <button>Refresh the summary</button>
         </div>
@@ -182,12 +238,31 @@
     </div>
   </div>
 
-  <footer>
-    <form class="send" id="send-form">
-      <textarea id="input" rows="1" placeholder="Ask the PM agent..." maxlength="2000"></textarea>
-      <button type="submit" id="send-button">Send</button>
-    </form>
-    <div class="hint">Enter to send, Shift+Enter for a new line. Figures come from the project sheets; the agent never edits them.</div>
+    <footer>
+    <div class="composer">
+      <div class="composer-inner">
+        <form class="send" id="send-form">
+          <svg class="prompt-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2l1.9 5.6L19.5 9.5l-5.6 1.9L12 17l-1.9-5.6L4.5 9.5l5.6-1.9z"/>
+            <path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/>
+          </svg>
+          <textarea id="input" rows="1" maxlength="2000"
+                    placeholder="Ask about projects, delays, developers or holidays..."></textarea>
+          <button type="submit" id="send-button" aria-label="Send" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>
+            </svg>
+            <span class="spinner"></span>
+          </button>
+        </form>
+        <div class="composer-meta">
+          <span class="keys"><kbd>Enter</kbd> to send &middot; <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span>
+          <span id="counter">0 / 2000</span>
+        </div>
+      </div>
+    </div>
+    <div class="hint">Figures come from the project sheets. The agent never edits them.</div>
   </footer>
 </div>
 
@@ -322,9 +397,11 @@ async function send(text) {
   text = text.trim();
   if (!text || busy) return;
   busy = true;
+  $("send-button").classList.add("loading");
   $("send-button").disabled = true;
   $("input").value = "";
   autoGrow();
+  updateComposer();
   addMessage("user", text);
   const typing = addTyping();
   try {
@@ -336,9 +413,17 @@ async function send(text) {
     addMessage("error", error.message);
   } finally {
     busy = false;
-    $("send-button").disabled = false;
+    $("send-button").classList.remove("loading");
+    updateComposer();
     $("input").focus();
   }
+}
+
+function updateComposer() {
+  const length = $("input").value.length;
+  $("counter").textContent = `${length} / 2000`;
+  $("counter").classList.toggle("near", length > 1800);
+  $("send-button").disabled = busy || !$("input").value.trim();
 }
 
 function autoGrow() {
@@ -377,7 +462,10 @@ $("input").addEventListener("keydown", (event) => {
     send($("input").value);
   }
 });
-$("input").addEventListener("input", autoGrow);
+$("input").addEventListener("input", () => {
+  autoGrow();
+  updateComposer();
+});
 
 document.querySelectorAll(".chips button").forEach((chip) =>
   chip.addEventListener("click", () => send(chip.textContent)));
