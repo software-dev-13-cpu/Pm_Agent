@@ -140,7 +140,41 @@ def new_chat(request: Request):
     current_login(request)["session_id"] = None
     return {"ok": True}
 
+# ---------- meetings (approval happens here, never in the agent) ----------
 
+class DecisionBody(BaseModel):
+    meeting_id: str
+
+
+@app.get("/api/meetings")
+def list_pending(request: Request):
+    current_login(request)
+    from pm_agent.meetings import pending_meetings
+    try:
+        return {"meetings": pending_meetings()}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not read meetings: {e}")
+
+
+@app.post("/api/meetings/approve")
+def approve(body: DecisionBody, request: Request):
+    login = current_login(request)
+    from pm_agent.meetings import approve_meeting
+    try:
+        return approve_meeting(body.meeting_id, login["user"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not create the meeting: {e}")
+
+
+@app.post("/api/meetings/reject")
+def reject(body: DecisionBody, request: Request):
+    login = current_login(request)
+    from pm_agent.meetings import reject_meeting
+    try:
+        return reject_meeting(body.meeting_id, login["user"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reject the meeting: {e}")
+    
 # ---------- page ----------
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 

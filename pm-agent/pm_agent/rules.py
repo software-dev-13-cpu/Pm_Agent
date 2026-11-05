@@ -27,15 +27,28 @@ def parse_date(value):
         return None
 
 
-def working_days_between(start, end):
+def is_working_day(day, leave_days=frozenset()):
+    """Monday-Friday, not a holiday, and not one of the given leave days."""
+    return day.weekday() < 5 and day not in HOLIDAY_DATES and day not in leave_days
+
+
+def working_days_between(start, end, leave_days=frozenset()):
     """Counts working days after start, up to and including end."""
     days = 0
     current = start
     while current < end:
         current += timedelta(days=1)
-        if current.weekday() < 5 and current not in HOLIDAY_DATES:
+        if is_working_day(current, leave_days):
             days += 1
     return days
+
+
+def back_on(today, leave_days):
+    """First working day after today's leave ends."""
+    day = today
+    while not is_working_day(day, leave_days):
+        day += timedelta(days=1)
+    return day
 
 
 def has_blocker(text):
@@ -80,16 +93,22 @@ def check_project(project, today):
         flags.append({"rule": "overdue",
                       "detail": f"Deadline was {deadline}, {(today - deadline).days} days ago, at {pct:.0f}% complete."})
 
+    leave_days = project.get("leave_days", set())
+    if today in leave_days:
+        name = info.get("Responsible developer", "The responsible developer")
+        flags.append({"rule": "on_leave",
+                      "detail": f"{name} is on leave today (back on {back_on(today, leave_days)})."})
+
     if latest is None:
         flags.append({"rule": "no_updates", "detail": "No progress rows yet."})
     else:
-        idle = working_days_between(latest["date"], today)
+        idle = working_days_between(latest["date"], today, leave_days)
         if idle >= STALE_AFTER_WORKING_DAYS:
+            skipped = sum(1 for d in leave_days
+                          if latest["date"] < d <= today and is_working_day(d))
+            note = f", not counting {skipped} leave day(s)" if skipped else ""
             flags.append({"rule": "stale",
-                          "detail": f"No update for {idle} working days (last on {latest['date']})."})
-        if has_blocker(latest["blocker"]):
-            flags.append({"rule": "blocked",
-                          "detail": f"Latest update reports a blocker: {latest['blocker']}"})
+                          "detail": f"No update for {idle} working days (last on {latest['date']}{note})."})
 
     expected = expected_percent(start, deadline, today)
     if expected is not None and expected - pct >= BEHIND_SCHEDULE_POINTS:
@@ -101,10 +120,11 @@ def check_project(project, today):
                       "detail": f"The project sheet says Project ID '{project['id_mismatch']}', "
                                 f"but the index says '{info.get('Project ID')}'."})
 
-    if project["bad_rows"]:
-        rows = ", ".join(str(r) for r in project["bad_rows"])
+    if project.get("leave_bad_rows"):
+        rows = ", ".join(str(r) for r in project["leave_bad_rows"])
         flags.append({"rule": "data_issue",
-                      "detail": f"Row(s) {rows} have an invalid date or completion % and were ignored."})
+                      "detail": f"Leave tab row(s) {rows} have a missing name or invalid dates "
+                                f"and were ignored."})
 
     return flags
 

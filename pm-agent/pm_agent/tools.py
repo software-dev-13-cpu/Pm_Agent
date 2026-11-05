@@ -6,10 +6,10 @@ from zoneinfo import ZoneInfo
 
 import holidays
 
-from .config import (SPREADSHEET_ID, SUMMARY_TAB, LOG_TAB, TIMEZONE, INDEX_TAB, HOLIDAYS_TAB,LK_HOLIDAY_CALENDAR)
+from .config import (SPREADSHEET_ID, SUMMARY_TAB, LOG_TAB, TIMEZONE, INDEX_TAB, HOLIDAYS_TAB,LK_HOLIDAY_CALENDAR, LEAVE_TAB)
 from .google_auth import sheets_service, gmail_service, calendar_service
-from .rules import snapshot, parse_date, set_holidays
-from .sheet_layout import parse_project_tab
+from .rules import snapshot, parse_date, set_holidays , back_on
+from .sheet_layout import parse_project_tab, parse_leave_rows, leave_days_for
 
 HEALTH_ORDER = {"Overdue": 0, "Needs attention": 1, "Ready to close": 2, "On track": 3}
 
@@ -96,9 +96,10 @@ def _load_holidays():
     return set_holidays(set(_company_holidays()), today, official_dates=set(official))
     
 
+LEAVE_STATUS = {"missing": []}
 
 def _load_projects():
-    """Reads the index tab, then each project's own spreadsheet."""
+    """Reads the index tab, then each project's own spreadsheet (Progress + Leave tabs)."""
     _load_holidays()
     values = sheets_service().spreadsheets().values()
     index = values.get(spreadsheetId=SPREADSHEET_ID,
@@ -114,8 +115,18 @@ def _load_projects():
         try:
             if file_id is None:
                 raise ValueError("The Sheet link is missing or is not a Google Sheets link.")
-            rows = values.get(spreadsheetId=file_id, range="A1:E").execute().get("values", [])
+            try:
+                ranges = values.batchGet(spreadsheetId=file_id,
+                                         ranges=["A1:E", f"{_quote(LEAVE_TAB)}!A2:E"]).execute()
+                rows = ranges["valueRanges"][0].get("values", [])
+                leave_rows = ranges["valueRanges"][1].get("values", [])
+                leave_missing = False
+            except Exception:
+                rows = values.get(spreadsheetId=file_id, range="A1:E").execute().get("values", [])
+                leave_rows, leave_missing = [], True
             project = parse_project_tab(name, None, rows)
+            project["leave"], project["leave_bad_rows"] = parse_leave_rows(leave_rows)
+            project["leave_missing"] = leave_missing
             file_says = project["info"].get("Project ID", "").upper()
             if file_says != project_id:
                 project["id_mismatch"] = file_says
@@ -123,10 +134,19 @@ def _load_projects():
         except Exception as e:
             project = {"tab": name, "gid": None, "entries": [], "bad_rows": [],
                        "has_table": False, "access_error": str(e)[:200],
+                       "leave": [], "leave_bad_rows": [], "leave_missing": False,
                        "info": {"Project ID": project_id, "Project name": name}}
         project["file_id"] = file_id
         projects.append(project)
+
+    all_leave = [entry for p in projects for entry in p["leave"]]
+    for project in projects:
+        project["leave_days"] = leave_days_for(all_leave,
+                                               project["info"].get("Responsible developer", ""))
+
+    LEAVE_STATUS["missing"] = [p["info"]["Project ID"] for p in projects if p["leave_missing"]]
     return projects
+
 
 def _find_project(projects, project_id):
     wanted = project_id.strip().upper()
@@ -357,6 +377,11 @@ def email_developer(project_id: str, note: str = "", force: bool = False) -> dic
             return {"status": "error", "message": f"{pid} has no 'Responsible email'."}
 
         last = project["entries"][-1]["date"] if project["entries"] else None
+        today = _now().date()
+        if not force and today in project["leave_days"]:
+            return {"status": "not_sent",
+                    "reason": f"{info.get('Responsible developer', to)} is on leave today "
+                              f"(back on {back_on(today, project['leave_days'])})."}
         if not force:
             for row in _read_log():
                 if len(row) >= 3 and row[1] == pid and row[2] == "Agent: reminder":
@@ -468,4 +493,58 @@ def list_holidays(project_id: str = "", start_date: str = "", end_date: str = ""
     if missing_years:
         reply["warning"] = (f"No official holiday list is available yet for {missing_years}. "
                             "Only company days off are shown for those years.")
+    return reply
+
+
+
+def who_is_on_leave(start_date: str = "", end_date: str = "") -> dict:
+    """Lists who is on leave in a period, from the Leave tab of every project
+    sheet, and which projects they are responsible for. Defaults to the next 14 days.
+
+    Args:
+        start_date: yyyy-mm-dd. Default today.
+        end_date: yyyy-mm-dd. Default 14 days after start_date.
+    """
+    start = parse_date(start_date) or _now().date()
+    end = parse_date(end_date) or start + timedelta(days=14)
+    if end < start or (end - start).days > 366:
+        return {"status": "error", "message": "Give a period of up to one year, start before end."}
+
+    try:
+        projects = _load_projects()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    people = {}
+    for p in projects:
+        pid = p["info"]["Project ID"]
+        responsible = p["info"].get("Responsible developer", "").strip()
+        if responsible:
+            person = people.setdefault(responsible.lower(), {"name": responsible, "days": {},
+                                                             "responsible_for": set()})
+            person["responsible_for"].add(pid)
+        for entry in p["leave"]:
+            person = people.setdefault(entry["developer"].lower(),
+                                       {"name": entry["developer"], "days": {},
+                                        "responsible_for": set()})
+            day = max(entry["from"], start)
+            while day <= min(entry["to"], end):
+                person["days"][day] = entry["type"] or "Leave"
+                day += timedelta(days=1)
+
+    result = []
+    for person in sorted(people.values(), key=lambda x: x["name"]):
+        if not person["days"]:
+            continue
+        days = sorted(person["days"])
+        result.append({
+            "name": person["name"],
+            "leave": [{"date": d.isoformat(), "type": person["days"][d]} for d in days],
+            "weekday_count": sum(1 for d in days if d.weekday() < 5),
+            "responsible_for": sorted(person["responsible_for"]),
+        })
+    reply = {"status": "success", "from": start.isoformat(), "to": end.isoformat(),
+             "count": len(result), "people": result}
+    if LEAVE_STATUS["missing"]:
+        reply["projects_without_leave_tab"] = LEAVE_STATUS["missing"]
     return reply

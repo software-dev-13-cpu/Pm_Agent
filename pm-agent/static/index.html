@@ -196,6 +196,44 @@
   #counter.near { color: var(--error); font-weight: 600; }
   .hint { max-width: 820px; margin: 8px auto 0; text-align: center; color: var(--muted); font-size: 12px; }
   @media (max-width: 520px) { .keys { display: none; } .composer-meta { justify-content: flex-end; } }
+
+
+
+    /* ---------- approvals ---------- */
+  .badge {
+    display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px;
+    margin-left: 4px; border-radius: 999px; background: var(--glow-2); color: #fff;
+    font-size: 11px; font-weight: 700;
+  }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 100%); z-index: 20;
+    display: flex; flex-direction: column; padding: 16px; overflow-y: auto;
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
+    backdrop-filter: blur(14px);
+    border-left: 1px solid var(--border); box-shadow: -10px 0 30px rgba(0, 0, 0, 0.25);
+  }
+  .drawer-head { display: flex; align-items: center; justify-content: space-between; }
+  .drawer-head h2 { margin: 0; font-size: 17px; }
+  .drawer-head button { border: 0; background: transparent; color: var(--text); font-size: 20px; }
+  .drawer-note { color: var(--muted); font-size: 13px; margin: 6px 0 14px; }
+  .meeting {
+    border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px;
+    margin-bottom: 12px; background: var(--panel);
+  }
+  .meeting h3 { margin: 0 0 4px; font-size: 14.5px; }
+  .meeting .when { font-weight: 600; font-size: 13.5px; }
+  .meeting .who { color: var(--muted); font-size: 12.5px; margin-top: 4px; overflow-wrap: anywhere; }
+  .meeting .warn { color: var(--error); font-size: 12.5px; margin-top: 6px; }
+  .meeting .actions { display: flex; gap: 8px; margin-top: 10px; }
+  .meeting .actions button { flex: 1; padding: 8px; border-radius: 10px; font-weight: 600; font-size: 13px; }
+  .meeting .actions button:disabled { opacity: 0.5; cursor: default; }
+  .approve { border: 0; color: #fff; background: linear-gradient(135deg, var(--glow-1), var(--glow-3)); }
+  .reject { border: 1px solid var(--border); background: transparent; color: var(--text); }
+  .meeting .result { font-size: 12.5px; margin-top: 8px; overflow-wrap: anywhere; }
+  .meeting .result a { color: var(--accent); }
+  .empty { color: var(--muted); font-size: 13.5px; text-align: center; padding: 30px 0; }
+
+
 </style>
 </head>
 <body>
@@ -219,6 +257,7 @@
   <header>
     <h1>PM Agent</h1>
     <span class="user" id="user-name"></span>
+    <button id="approvals-button">Approvals<span id="approvals-count" class="badge hidden">0</span></button>
     <button id="new-chat">New chat</button>
     <button id="logout">Log out</button>
   </header>
@@ -237,6 +276,15 @@
       </div>
     </div>
   </div>
+
+    <aside id="approvals" class="drawer hidden" aria-label="Pending approvals">
+    <div class="drawer-head">
+      <h2>Pending approvals</h2>
+      <button id="approvals-close" aria-label="Close">&times;</button>
+    </div>
+    <p class="drawer-note">Meetings proposed by the agent. Nothing is sent until you approve.</p>
+    <div id="approvals-list"></div>
+  </aside>
 
     <footer>
     <div class="composer">
@@ -282,6 +330,7 @@ function showChat(user) {
   $("chat-screen").classList.remove("hidden");
   $("user-name").textContent = user;
   $("input").focus();
+  loadApprovals();
 }
 
 // ---------- talking to the server ----------
@@ -408,6 +457,7 @@ async function send(text) {
     const data = await api("/api/chat", { message: text });
     typing.remove();
     addMessage("agent", data.reply, data.tools);
+    loadApprovals();
   } catch (error) {
     typing.remove();
     addMessage("error", error.message);
@@ -431,6 +481,99 @@ function autoGrow() {
   box.style.height = "auto";
   box.style.height = Math.min(box.scrollHeight, 140) + "px";
 }
+
+// ---------- approvals ----------
+let pending = [];
+
+function formatWhen(start, end) {
+  const day = new Date(start.slice(0, 10) + "T12:00").toLocaleDateString(undefined,
+    { weekday: "short", day: "numeric", month: "short" });
+  return `${day}, ${start.slice(11)} - ${end.slice(11)}`;
+}
+
+async function loadApprovals() {
+  let error = "";
+  try {
+    pending = (await api("/api/meetings")).meetings;
+  } catch (e) {
+    pending = [];
+    error = e.message;
+  }
+  $("approvals-count").textContent = pending.length;
+  $("approvals-count").classList.toggle("hidden", pending.length === 0);
+  renderApprovals(error);
+}
+
+function renderApprovals(error = "") {
+  const list = $("approvals-list");
+  list.innerHTML = "";
+  if (error) {
+    const box = document.createElement("div");
+    box.className = "empty";
+    box.style.color = "var(--error)";
+    box.textContent = "Could not load approvals: " + error;
+    list.appendChild(box);
+    return;
+  }
+  if (!pending.length) {
+    list.innerHTML = '<div class="empty">No meetings waiting for approval.</div>';
+    return;
+  }
+  pending.forEach((meeting) => {
+    const card = document.createElement("div");
+    card.className = "meeting";
+    card.innerHTML = '<h3></h3><div class="when"></div><div class="who"></div><div class="warn"></div>' +
+      '<div class="actions"><button class="approve">Approve</button>' +
+      '<button class="reject">Reject</button></div><div class="result"></div>';
+    card.querySelector("h3").textContent = `${meeting.project}: ${meeting.purpose}`;
+    card.querySelector(".when").textContent = formatWhen(meeting.start, meeting.end);
+    card.querySelector(".who").textContent = "Invitees: " + meeting.attendees.join(", ");
+    card.querySelector(".warn").textContent = meeting.notes ? "Note: " + meeting.notes : "";
+    card.querySelector(".approve").addEventListener("click", () => decide(card, meeting.id, "approve"));
+    card.querySelector(".reject").addEventListener("click", () => decide(card, meeting.id, "reject"));
+    list.appendChild(card);
+  });
+}
+
+async function decide(card, id, action) {
+  const buttons = card.querySelectorAll("button");
+  const result = card.querySelector(".result");
+  buttons.forEach((b) => (b.disabled = true));
+  result.style.color = "";
+  result.textContent = action === "approve" ? "Creating the meeting..." : "Rejecting...";
+  try {
+    const data = await api(`/api/meetings/${action}`, { meeting_id: id });
+    result.textContent = data.message;
+    if (data.ok && data.meet_link && data.meet_link.startsWith("https://")) {
+      const link = document.createElement("a");
+      link.href = data.meet_link;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = " Open Meet link";
+      result.appendChild(link);
+    }
+    if (data.ok) {
+      setTimeout(loadApprovals, 2500);
+    } else {
+      result.style.color = "var(--error)";
+      buttons.forEach((b) => (b.disabled = false));
+    }
+  } catch (error) {
+    result.style.color = "var(--error)";
+    result.textContent = error.message;
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+function openApprovals() {
+  $("approvals").classList.remove("hidden");
+  loadApprovals();
+}
+
+function closeApprovals() {
+  $("approvals").classList.add("hidden");
+}
+
 
 // ---------- events ----------
 $("login-form").addEventListener("submit", async (event) => {
@@ -478,6 +621,13 @@ $("new-chat").addEventListener("click", async () => {
 $("logout").addEventListener("click", async () => {
   await api("/api/logout", {}).catch(() => {});
   location.reload();
+});
+
+
+$("approvals-button").addEventListener("click", openApprovals);
+$("approvals-close").addEventListener("click", closeApprovals);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeApprovals();
 });
 
 // ---------- start ----------

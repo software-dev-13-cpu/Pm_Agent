@@ -20,6 +20,15 @@ TIMEZONE = "Asia/Colombo"
 STALE_AFTER_WORKING_DAYS = 3
 BEHIND_SCHEDULE_POINTS = 20
 
+
+TEAM_TAB = "Team"
+MEETINGS_TAB = "Meetings"
+WORK_START_HOUR = 9
+WORK_END_HOUR = 17
+MEETING_SEARCH_DAYS = 10
+
+LEAVE_TAB = "Leave"
+
 # Public holidays (yyyy-mm-dd) that don't count as working days, e.g. Poya days.
 HOLIDAYS_TAB = "Holidays"
 LK_HOLIDAY_CALENDAR = "en.lk#holiday@group.v.calendar.google.com"
